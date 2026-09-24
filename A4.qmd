@@ -1,0 +1,359 @@
+---
+title: "DATA301 Assignment 4"
+author: "Tim"
+format:
+  html:
+    mainfont: "Times New Roman"
+    embed-resources: true
+execute:
+  echo: true
+---
+
+# Exercise 1
+## A:
+
+### Summary of Wicklin (2017) article.
+Sample quantiles can be computed in several ways, between different statistical softwares there is no one true definition for which quantile computation is correct. Hyndman and Fan (1996) identified nine definitions for common use and Wicklin (2017) compares these definitions visually. 
+
+Three of the nine definitions work by rounding to an order statistic, these are types 1 - 3. While types 4 - 9 use linear interpolation between adjacent order statistics. In practice this means the discrete types can only return a data value or the average of two neighbouring values, while the interpolating types can return any value within the range of the data.
+
+The differences between the definitions are most apparent when the sample size is small (e.g. n=10). Wicklin shows that for around 100 or more observations, the definitions give near identical results, which is why most analysts do not worry about which definition they use. The definitions do disagree most for the extreme quantiles. They also disagree when there are large gaps between data values as this is where the choice of which order statistic is used, and how it is weighted, can have a large effect on the quantile value.
+
+### Which type of order statistic I would use
+
+The choice of definition is important. The simulation will use samples as small as n = 5. Exponential data is also right skewed, so there are often large gaps between the larger values, which is where Wicklin shows the definitions disagree most. This means that the choice of definition will have a great effect on the results. In this situation I would use type 8. Hyndman and Fan (1996) recommend it because it is approximately median-unbiased regardless of the underlying distribution, which is useful here since the estimator needs to behave well at small sample sizes.
+
+#### Default order statistic type in my R
+I am running R version 4.4.3, which has the default order statistic type 7.
+
+## B:
+### Bootstrap bias correction
+The bias of the IQR estimator is:
+$$
+B(\lambda) = E\left[\hat\lambda_{{IQR}}(\mathbf{X})\right] - \lambda
+$$
+
+This equation cant be directly computed becasue it depends on the unknown distribution of the data. The bootstrap is used to replace this unknown distribution with the empirical distribution of the sample. This means the true $\lambda$ is replace with the sample estimate $\hat\lambda_{\text{IQR}}(\mathbf{X})$ and the expectation is approximated by averaging over bootstrap samples. 
+
+Draw $B = 200$ boostrap samples $\mathbf{X}^*_1, \dots, \mathbf{X}^*_B$ from $\mathbf{X}$ with replacement, and compute $\hat\lambda^*_b = \hat\lambda_{\text{IQR}}(\mathbf{X}^*_b)$ for each. The bootstrap estimate of the bias is
+
+$$
+\hat B = \frac{1}{B}\sum_{b=1}^{B} \hat\lambda^*_b - \hat\lambda_{\text{IQR}}(\mathbf{X}).
+$$
+
+Subtracting this from the original estimate will give the bias corrected estimator.
+
+$$
+\tilde\lambda = \hat\lambda_{\text{IQR}}(\mathbf{X}) - \hat B = 2\hat\lambda_{\text{IQR}}(\mathbf{X}) - \frac{1}{B}\sum_{b=1}^{B} \hat\lambda^*_b.
+$$
+
+This is a first order correction because it will remove the leading term in the bias, which is of the order $1/n$. The bias corrected estimator will be less biased than the original estimator, but it will still be biased.
+
+### Implementation
+
+```{r}
+library(ggplot2)
+theme_set(theme_grey(base_family = "serif"))
+update_geom_defaults("text", list(family = "serif"))
+lambda_iqr <- function(x) {
+  q <- quantile(x, c(0.25, 0.75), type = 8, names = FALSE)
+  log(3) / (q[2] - q[1])
+}
+
+lambda_boot <- function(x, B = 200) {
+  est <- lambda_iqr(x)
+  boot_est <- replicate(B, lambda_iqr(sample(x, replace = TRUE)))
+  boot_est <- boot_est[is.finite(boot_est)]
+  2 * est - mean(boot_est)
+}
+set.seed(2389764)
+has_inf <- replicate(1000, {
+  x5 <- rexp(5, rate = 1)
+  boot_est <- replicate(200, lambda_iqr(sample(x5, replace = TRUE)))
+  any(!is.finite(boot_est))
+})
+mean(has_inf)
+```
+
+Because the data come from a continuous distribution, the original sample has no repeated values. Bootstrap resamples, however, are drawn with replacement from only $n$ observed values, so repeats are common when $n$ is small. With type 8 quantiles and $n = 5$, the IQR is zero only if all five resampled values are the same observation, in which case $\hat\lambda^*_b$ is infinite. This has probability $5 \times (1/5)^5 = 0.0016$ per resample, but across 200 resamples about 27% of samples of size 5 will have at least one (26.5% in a simulation of 1000 samples). The code removes any infinite values from the bootstrap estimates before computing the mean. For $n = 30$ and $n = 100$ this is effectively impossible.
+
+## C: Monte Carlo experiment
+```{r}
+lambda_ml <- function(x) {
+  1 / mean(x)
+}
+
+run_sim <- function(lambda, n, R) {
+  est <- t(replicate(R, {
+    x <- rexp(n, rate = lambda)
+    c(ml = lambda_ml(x), iqr = lambda_iqr(x), boot = lambda_boot(x))
+  }))
+  sq_err <- (est - lambda)^2
+  data.frame(
+    lambda = lambda,
+    n = n,
+    estimator = colnames(est),
+    mse = colMeans(sq_err),
+    mc_se = apply(sq_err, 2, sd) / sqrt(R)
+  )
+}
+
+set.seed(301)
+grid <- expand.grid(lambda = c(0.1, 1, 10), n = c(5, 30, 100))
+pilot <- do.call(rbind, lapply(1:nrow(grid), function(i) {
+  run_sim(grid$lambda[i], grid$n[i], R = 500)
+}))
+pilot$rel_se <- pilot$mc_se / pilot$mse
+pilot$R_needed <- ceiling((pilot$rel_se * sqrt(500) / 0.05)^2)
+pilot
+```
+```{r}
+#| cache: true #so it doesnt take 30 minutes to run every time
+R_by_n <- c("5" = 10000, "30" = 2500, "100" = 1500)
+
+set.seed(301)
+results <- do.call(rbind, lapply(1:nrow(grid), function(i) {
+  n <- grid$n[i]
+  run_sim(grid$lambda[i], n, R = R_by_n[as.character(n)])
+}))
+
+results$rel_se <- results$mc_se / results$mse
+results$mse_scaled <- results$mse / results$lambda^2
+rownames(results) <- NULL
+```
+```{r}
+knitr::kable(results, digits = 4)
+```
+The Monte Carlo estimate of the MSE is itself an average, so it has a standard error of $\text{sd}\left[(\hat\lambda - \lambda)^2\right]/\sqrt{R}$, which shrinks as the number of replications $R$ grows (Robert & Casella, 2009). To choose $R$, I ran a pilot of 500 replications for every combination of $\lambda$ and $n$, calculated the relative standard error (standard error divided by MSE), and estimated the $R$ needed to bring it down to 5%. Because the standard error scales with $1/\sqrt{R}$, this is $R = \left(\text{relative SE}_{500} \times \sqrt{500} / 0.05\right)^2$.
+
+The number of replications only needs to depend on $n$, not on $\lambda$. If $X \sim \text{Exp}(\lambda)$ then $X = Y/\lambda$ with $Y \sim \text{Exp}(1)$, and all three estimators scale with the data, so $\hat\lambda/\lambda$ has the same distribution for every $\lambda$. The relative error of the MSE is therefore the same for each $\lambda$ at a given $n$, and the differences in the pilot across $\lambda$ are Monte Carlo noise. The scaled MSE column ($\text{MSE}/\lambda^2$) in the final table confirms this for the ML and IQR estimators.
+
+For the ML and IQR estimators, the pilot suggested at most about 6800 replications for $n = 5$, 2200 for $n = 30$ and 1200 for $n = 100$, so I used 10000, 2500 and 1500 respectively. In the final results the relative standard errors are between 3.6% and 5.5% for $n = 30$ and $n = 100$. For $n = 5$ they are between 4.1% and 8.2%, a little above the target in some cases, because squared errors at small $n$ are heavily skewed and the pilot underestimated their spread.
+
+The bias-corrected estimator at $n = 5$ could not be brought to this precision. The pilot suggested up to about 154000 replications, and even with 10000 its relative standard error is between 44% and 93%. Its MSE estimates at $n = 5$ are therefore not reliable, and the scaled MSE varies from 369 to 3834 across $\lambda$ even though it should be the same for all three.
+
+### Results
+
+As a check on the simulation, the ML estimator has a known MSE. Since $\sum X_i \sim \text{Gamma}(n, \lambda)$,
+
+$$
+\text{MSE}\left(\hat\lambda_{\text{ML}}\right) = \lambda^2 \frac{n + 2}{(n - 1)(n - 2)},
+$$
+
+which gives scaled MSEs of 0.583, 0.039 and 0.011 for $n = 5$, 30 and 100. The simulated values (0.56 to 0.58, 0.039 to 0.041, and 0.010 to 0.011) agree closely.
+
+The ML estimator has the lowest MSE in every setting. This is expected, since the data really are exponential and the ML estimator uses the whole sample. The IQR estimator, which only uses the two quartiles, has a scaled MSE about 1.6 times larger at $n = 5$ and about 2.2 to 2.5 times larger at $n = 30$ and $n = 100$.
+
+The bootstrap bias correction does not improve on the IQR estimator. At $n = 30$ and $n = 100$ its MSE is about 15 to 25% higher than the uncorrected IQR estimator. Since MSE is squared bias plus variance, this means the variance added by the correction outweighs any reduction in bias. At $n = 5$ the corrected estimator is unstable. When a bootstrap resample has a very small interquartile range, $\hat\lambda^*_b$ is very large, which inflates the bootstrap mean. Because $\tilde\lambda = 2\hat\lambda_{\text{IQR}} - \bar\lambda^*$, this can push the corrected estimate far from $\lambda$ and even below zero, which is impossible for a rate parameter.
+
+For all three estimators, the MSE falls quickly as $n$ grows, roughly in proportion to $1/n$ between $n = 30$ and $n = 100$. Under a correctly specified exponential model, the ML estimator is the best choice. The IQR estimator is a reasonable simple alternative for moderate $n$, and would be expected to do better than ML when there are surprising observations, but that case was not tested here. The first-order bootstrap correction is not worth using for this estimator, particularly for small samples.
+
+# Exercise 2
+## 1: Frequency of the series
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+#| message: false #stops it from saying x axis is present each time
+library(fpp2)
+beer <- ausbeer
+
+beer_recent <- window(beer, start = 2000)
+
+autoplot(beer_recent) +
+  geom_point(colour = "darkred") +
+  scale_x_continuous(breaks = 2000:2010) +
+  labs(x = "Year", y = "Megalitres",
+       title = "Beer production from 2000")
+```
+
+The frequency of the series is `r frequency(beer)`, meaning there are `r frequency(beer)` observations per year (quarterly data).
+The series starts in `r start(beer)[1]` Q`r start(beer)[2]` and ends in `r end(beer)[1]` Q`r end(beer)[2]`, with `r length(beer)` observations. In terms of the time series plot, we can see this frequency in the repeating seasonal pattern, where each cycle spans four observations with one peak and one trough per year. The plot of the series from 2000 onwards shows that there is a clear seasonal pattern, with peaks occurring around the same time each year.
+
+## 2: Behaviour
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+beer_trend <- ma(beer, order = 4, centre = TRUE)
+
+autoplot(beer) +
+  autolayer(beer_trend, series = "Trend") +
+  scale_colour_manual(values = c(Trend = "red")) +
+  labs(x = "Year", y = "Megalitres", colour = "",
+       title = "Quarterly beer production in Australia")
+```
+In the plot we see growth from approximately 250 ML to about 490 ML from 1956 to about 1975. We then see a slight plateau and then a sharp decline in the early 1990s leading into a gradual decline between 1995 and 2010. This could also be why Hyndman and Athanasopoulos only use data from 1992, since the recent behaviour is quite different from the early growth phase. There is clear evidence of a long-term trend: the moving average rises, levels off, and then declines, so the trend is not constant over time.
+
+## 3: Seasonal Trends
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+beer_q <- data.frame(
+  time = as.numeric(time(beer_recent)),
+  production = as.numeric(beer_recent),
+  quarter = factor(cycle(beer_recent))
+)
+
+ggplot(beer_q, aes(x = time, y = production)) +
+  geom_line(colour = "grey50") +
+  geom_point(aes(colour = quarter), size = 2) +
+  scale_colour_manual(values = c("1" = "darkorange", "2" = "steelblue",
+                                 "3" = "darkgreen", "4" = "red")) +
+  scale_x_continuous(breaks = 2000:2010) +
+  labs(x = "Year", y = "Megalitres", colour = "Quarter",
+       title = "Beer production from 2000 by quarter")
+
+average_by_quarter <- aggregate(production ~ quarter, data = beer_q, FUN = mean)
+```
+Yes, there is clear seasonality in the data. The plot shows that Q4 is the highest quarter, averaging `r round(average_by_quarter$production[4], 1)` ML, followed by Q1 at `r round(average_by_quarter$production[1], 1)` ML. Q3 is the second lowest quarter at `r round(average_by_quarter$production[3], 1)` ML, while Q2 is the lowest, averaging `r round(average_by_quarter$production[2], 1)` ML. Q2 is the lowest quarter in every year shown except 2002, when Q3 was slightly lower. The gap between the highest and lowest quarters is about `r round(average_by_quarter$production[4] - average_by_quarter$production[2])` ML, and this ordering repeats every year. As for why, a likely theory is that Q4 and Q1 cover spring into summer and summer into autumn in Australia, a popular time for beer consumption due to holidays, warm weather and sporting events. Q2 and Q3, in contrast, cover autumn into winter and winter into spring, when colder weather and fewer outdoor events likely mean lower consumption.
+
+## 4: Variability 
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+beer_years <- data.frame(
+  year = floor(as.numeric(time(beer))),
+  production = as.numeric(beer)
+)
+beer_years <- beer_years[beer_years$year < 2010, ]
+
+yearly_mean <- aggregate(production ~ year, data = beer_years, FUN = mean)
+yearly_range <- aggregate(production ~ year, data = beer_years,
+                          FUN = function(x) max(x) - min(x))
+
+yearly <- data.frame(
+  year = yearly_mean$year,
+  mean = yearly_mean$production,
+  range = yearly_range$production
+)
+
+ggplot(yearly, aes(x = year, y = range)) +
+  geom_line() +
+  geom_point() +
+  labs(x = "Year", y = "Yearly range (Megalitres)",
+       title = "Size of the seasonal swing each year")
+```
+The variability does not appear constant over time. In the full series plot, the seasonal swings in the 1950s and 1960s are clearly smaller than those in the 1970s and 1980s. To check this, the plot above shows the yearly range (highest quarter minus lowest quarter) for each full year. The range grows from about 80 to 95 ML in the late 1950s to over 150 ML at times in the 1970s and 1980s, with the largest swing in `r yearly$year[which.max(yearly$range)]` at `r round(max(yearly$range))` ML. After about 1995 the range shrinks back to around 90 to 110 ML, and the smallest swing is in `r yearly$year[which.min(yearly$range)]` at `r round(min(yearly$range))` ML.
+
+The size of the swing roughly follows the trend from Q2, being larger when production is high and smaller when it is lower. This suggests the seasonal variation is partly proportional to the level of the series, so a log or Box-Cox transformation could help stabilise the variance. The relationship is noisy, however, and in the data from 1992 onwards the variance looks fairly stable, so a transformation would matter more if the full series were modelled than if only recent data were used.
+
+## 5: Other observations
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+beer_out <- tsoutliers(beer)
+beer_out
+
+beer_flagged <- data.frame(
+  time = as.numeric(time(beer))[beer_out$index],
+  production = as.numeric(beer)[beer_out$index]
+)
+
+autoplot(beer) +
+  geom_point(data = beer_flagged, aes(x = time, y = production),
+             colour = "red", size = 3) +
+  labs(x = "Year", y = "Megalitres",
+       title = "Quarterly beer production with flagged observations")
+
+time(beer)[beer_out$index]
+   cycle(beer)[beer_out$index]
+
+data.frame(
+  time = time(beer)[beer_out$index],
+  quarter = cycle(beer)[beer_out$index],
+  actual = beer[beer_out$index],
+  expected = beer_out$replacements
+)
+```
+To identify unusual observations, `tsoutliers()` from the forecast package was used. It removes the trend and seasonal pattern and flags values with unusually large deviations from what is left. It flagged two consecutive observations: 1980 Q4 at `r beer[beer_out$index[1]]` ML, where about `r round(beer_out$replacements[1])` ML was expected, and 1981 Q1 at `r beer[beer_out$index[2]]` ML, where about `r round(beer_out$replacements[2])` ML was expected.
+
+These two stand out because they break the seasonal pattern described in Q3. Q4 is normally the peak of the year, but 1980 Q4 is well below a typical Q4 value, while 1981 Q1 is well above a typical Q1. This is the only point in the series where a Q1 value is higher than the Q4 before it. The two deviations are almost equal and opposite, and the combined total for the two quarters is close to what was expected. This suggests that some production shifted from late 1980 into early 1981, possibly because of a disruption or a change in how production was recorded. The data alone cannot confirm the cause.
+
+Two other observations attract attention visually but were not flagged. 2004 Q4 (`r window(beer, start = c(2004, 4), end = c(2004, 4))` ML) is a much lower peak than the Q4 values around it, and gives the smallest yearly swing in the series (Q4). The final observation, 2010 Q2 (`r tail(beer, 1)` ML), is also low. Neither falls outside the normal range according to the method, and the last value in a series is harder to judge because there are no later values to compare it with. 
+
+## 6: Plotting series by season
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+beer_season <- data.frame(
+  year = floor(as.numeric(time(beer))),
+  quarter = factor(cycle(beer)),
+  production = as.numeric(beer)
+)
+
+ggplot(beer_season, aes(x = quarter, y = production,
+                        group = year, colour = year)) +
+  geom_line() +
+  geom_text(data = subset(beer_season, quarter == "1"),
+            aes(label = year), hjust = 1.2, size = 2.5) +
+  geom_text(data = subset(beer_season, quarter == "4"),
+            aes(label = year), hjust = -0.2, size = 2.5) +
+  scale_colour_gradientn(colours = scales::hue_pal()(10)) +
+  labs(x = "Quarter", y = "Megalitres", colour = "Year",
+       title = "Seasonal plot of beer production")
+```
+The seasonal plot draws each year as a separate line across the four quarters, coloured from orange for the earliest years to pink for the most recent. It shows several things that are harder to see in the ordinary time plot.
+
+First, it makes the shape of the seasonal pattern clear. Almost every year follows the same path: production falls from Q1 to Q2, stays flat or rises slightly into Q3, then rises sharply to Q4. In the time plot the peaks and troughs are visible, but the difference between Q2 and Q3 is hard to pick out. Here it is clear that Q3 is usually slightly above Q2, although in six of the 54 full years (1975, 1978, 1984, 1990, 1993 and 2002) it dips below.
+Second, unusual years stand out because their lines break the common shape. 1981 starts well above every other year in Q1, which matches the high 1981 Q1 value flagged in question 5. 2004 has a much weaker rise into Q4 than the years around it. Both are easy to miss among the 218 points of the time plot.
+
+Third, the trend appears as the vertical position of the lines. The earliest years sit at the bottom, the 1970s and 1980s at the top, and the 2000s have moved back down into the middle, overlapping with the late 1980s and 1990s. This shows the growth, plateau and decline from question 2 in a single view.
+
+Finally, the seasonal shape holds across very different levels of production, from around 250 ML to over 550 ML. This suggests the pattern itself is stable over time even though the size of the swings changes, as discussed in question 4.
+
+## 7: Seasonal subseries plot
+```{r}
+#| fig-width: 8
+#| fig-height: 4
+ggsubseriesplot(beer) +
+  labs(x = "Quarter", y = "Megalitres",
+       title = "Seasonal subseries plot of beer production")
+aggregate(production ~ quarter, data = beer_season, FUN = mean)
+quarter_means <- aggregate(production ~ quarter, data = beer_season, FUN = mean)
+```
+
+The seasonal subseries plot shows a separate mini time series for each quarter, with a horizontal line at that quarter's mean. Q4 has the highest typical value, averaging `r round(quarter_means$production[4], 1)` ML, and Q2 has the lowest at `r round(quarter_means$production[2], 1)` ML. Q1 (`r round(quarter_means$production[1], 1)` ML) and Q3 (`r round(quarter_means$production[3], 1)` ML) sit in between, giving an order of Q4, Q1, Q3, Q2. These means are averaged over the whole series, including the early growth phase, so they are a rough summary rather than a typical value for any particular period.
+
+The ordering of the quarters is stable over time. All four panels follow the same shape, with growth up to the mid 1970s, a plateau, and then a decline, so each quarter has moved with the overall trend rather than on its own. The size of the seasonal effect is less stable. The Q4 panel rises from about 310 ML to about 600 ML, while Q2 rises from about 215 ML to about 465 ML, so the gap between the highest and lowest quarters widens during the growth phase. After 1990, Q4 falls further than the other quarters, and the seasonal peak becomes less pronounced than it was in the 1980s. This matches the change in variability described in question 4.
+
+The unusual observations from question 5 are also visible: 1981 Q1 appears as a spike near the top of the Q1 panel, and 1980 Q4 and 2004 Q4 appear as dips in the Q4 panel.
+
+## 8: Detrend or transform the series
+```{r}
+#| fig-width: 8
+#| fig-height: 5
+beer_log <- log(beer)
+beer_log_trend <- ma(beer_log, order = 4, centre = TRUE)
+
+detrended <- rbind(
+  data.frame(time = as.numeric(time(beer)),
+             value = as.numeric(beer - beer_trend),
+             series = "Original, detrended (Megalitres)"),
+  data.frame(time = as.numeric(time(beer)),
+             value = as.numeric(beer_log - beer_log_trend),
+             series = "Log, detrended")
+)
+detrended <- na.omit(detrended)
+
+ggplot(detrended, aes(x = time, y = value)) +
+  geom_line() +
+  facet_wrap(~ series, ncol = 1, scales = "free_y") +
+  labs(x = "Year", y = "",
+       title = "Beer production with the trend removed")
+```
+The plot above removes the trend from the series using the moving average from question 2, once on the original scale and once after a log transformation. Both panels are now centred on zero with no rise or fall, which shows how much of the original series' behaviour was trend.
+
+I would transform the series before modelling it. In the original detrended panel, the swings are about -40 to +50 ML in the late 1950s, widen to about -60 to +90 ML in the 1970s and 1980s, reach over +110 ML around 1990, and narrow again in the 2000s. The variance clearly changes with the level of the series. In the log panel the swings are much more even, with most of the series between about -0.1 and +0.15. The log does slightly overcorrect, since the late 1950s and early 1960s are now a little wider than the middle of the series. This fits with question 4, where the seasonal swing grew with the level but not fully in proportion. A Box-Cox transformation with a parameter between 0 and 1 may therefore stabilise the variance better than a log, but either is a clear improvement on the original scale.
+
+I would also detrend the series if the full series is modelled. The trend is large and changes direction, rising, levelling off and then declining (question 2), so a straight-line detrend would not work. A flexible method such as the moving average used here, or differencing, would be needed.
+
+If only data from 1992 onwards were modelled, as Hyndman and Athanasopoulos do, the trend is mild and the variance fairly stable, so neither step would matter much.
+
+# References
+
+Hyndman, R. J., & Athanasopoulos, G. (2018). *Forecasting: Principles and practice*. OTexts. <https://OTexts.com/fpp2>
+
+Hyndman, R. J., & Fan, Y. (1996). Sample quantiles in statistical packages. *The American Statistician*, *50*(4), 361. <https://doi.org/10.2307/2684934>
+
+Robert, C. P., & Casella, G. (2009). *Introducing Monte Carlo methods with R*. Springer.
+
+Wicklin, R. (2017). Sample quantiles: A comparison of 9 definitions. *SAS Blogs*. <https://blogs.sas.com/content/iml/2017/05/24/definitions-sample-quantiles.html>
